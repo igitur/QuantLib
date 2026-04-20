@@ -2075,10 +2075,12 @@ set(QL_HEADERS
     termstructures/multicurve.hpp
     termstructures/inflation/inflationhelpers.hpp
     termstructures/inflation/inflationtraits.hpp
+    termstructures/inflation/interpolatedforwardzeroinflationcurve.hpp
     termstructures/inflation/interpolatedyoyinflationcurve.hpp
     termstructures/inflation/interpolatedzeroinflationcurve.hpp
     termstructures/inflation/piecewiseyoyinflationcurve.hpp
     termstructures/inflation/piecewisezeroinflationcurve.hpp
+    termstructures/inflation/piecewisezeroforwardinflationcurve.hpp
     termstructures/inflation/seasonality.hpp
     termstructures/inflationtermstructure.hpp
     termstructures/interpolatedcurve.hpp

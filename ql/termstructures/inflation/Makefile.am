@@ -6,9 +6,11 @@ this_include_HEADERS = \
     all.hpp \
     inflationhelpers.hpp \
     inflationtraits.hpp \
+    interpolatedforwardinflationcurve.hpp \
     interpolatedyoyinflationcurve.hpp \
     interpolatedzeroinflationcurve.hpp \
     piecewiseyoyinflationcurve.hpp \
+    piecewisezeroforwardinflationcurve.hpp \
     piecewisezeroinflationcurve.hpp \
     seasonality.hpp
 

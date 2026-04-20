@@ -28,6 +28,7 @@
 
 #include <ql/termstructures/inflation/interpolatedzeroinflationcurve.hpp>
 #include <ql/termstructures/inflation/interpolatedyoyinflationcurve.hpp>
+#include <ql/termstructures/inflation/interpolatedforwardinflationcurve.hpp>
 #include <ql/termstructures/bootstraphelper.hpp>
 
 namespace QuantLib {
@@ -40,6 +41,12 @@ namespace QuantLib {
     //! Bootstrap traits to use for PiecewiseZeroInflationCurve
     class ZeroInflationTraits {
       public:
+        //! interpolated curve type
+        template <class Interpolator>
+        struct curve {
+            typedef InterpolatedZeroInflationCurve<Interpolator> type;
+        };
+
         typedef BootstrapHelper<ZeroInflationTermStructure> helper;
 
         // start of curve data
@@ -117,6 +124,12 @@ namespace QuantLib {
     //! Bootstrap traits to use for PiecewiseYoYInflationCurve
     class YoYInflationTraits {
       public:
+        //! interpolated curve type
+        template <class Interpolator>
+        struct curve {
+            typedef InterpolatedYoYInflationCurve<Interpolator> type;
+        };
+
         // helper class
         typedef BootstrapHelper<YoYInflationTermStructure> helper;
 
@@ -176,6 +189,90 @@ namespace QuantLib {
                                 Rate level,
                                 Size i) {
             data[i] = level;
+        }
+        // transformation to add constraints to an unconstrained optimization
+        template <class C>
+        static Real transformDirect(Real x, Size, const C*) {
+            return x;
+        }
+        template <class C>
+        static Real transformInverse(Real x, Size, const C*) {
+            return x;
+        }
+        // upper bound for convergence loop
+        static Size maxIterations() { return 40; }
+    };
+
+    //! Bootstrap traits to use for PiecewiseZeroForwardInflationCurve.
+    /*!  Bootstraps instantaneous forward inflation rates; zero-coupon
+         rates are recovered by integration.  Analogous to the ForwardRate
+         traits in the yield-curve world.
+    */
+    class ZeroForwardInflationTraits {
+      public:
+        //! interpolated curve type
+        template <class Interpolator>
+        struct curve {
+            typedef InterpolatedForwardInflationCurve<Interpolator> type;
+        };
+
+        typedef BootstrapHelper<ZeroInflationTermStructure> helper;
+
+        // start of curve data
+        static Date initialDate(const ZeroInflationTermStructure* t) {
+            return t->baseDate();
+        }
+        // value at reference date
+        static Rate initialValue(const ZeroInflationTermStructure*) {
+            return detail::avgInflation;
+        }
+
+        // guesses
+        template <class C>
+        static Rate guess(Size i,
+                          const C* c,
+                          bool validData,
+                          Size) // firstAliveHelper
+        {
+            if (validData) // previous iteration value
+                return c->data()[i];
+
+            return detail::avgInflation;
+        }
+
+        // constraints
+        template <class C>
+        static Rate minValueAfter(Size,
+                                  const C* c,
+                                  bool validData,
+                                  Size) // firstAliveHelper
+        {
+            if (validData) {
+                Rate r = *(std::min_element(c->data().begin(), c->data().end()));
+                return r<0.0 ? Real(r*2.0) : r/2.0;
+            }
+            return -detail::maxInflation;
+        }
+        template <class C>
+        static Rate maxValueAfter(Size,
+                                  const C* c,
+                                  bool validData,
+                                  Size) // firstAliveHelper
+        {
+            if (validData) {
+                Rate r = *(std::max_element(c->data().begin(), c->data().end()));
+                return r<0.0 ? Real(r/2.0) : r*2.0;
+            }
+            return detail::maxInflation;
+        }
+
+        // update with new guess
+        static void updateGuess(std::vector<Rate>& data,
+                                Rate level,
+                                Size i) {
+            data[i] = level;
+            if (i == 1)
+                data[0] = level; // propagate to base node, like ZeroInflationTraits
         }
         // transformation to add constraints to an unconstrained optimization
         template <class C>

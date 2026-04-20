@@ -28,6 +28,7 @@
 #include <ql/indexes/inflation/aucpi.hpp>
 #include <ql/termstructures/inflation/piecewisezeroinflationcurve.hpp>
 #include <ql/termstructures/inflation/piecewiseyoyinflationcurve.hpp>
+#include <ql/termstructures/inflation/piecewisezeroforwardinflationcurve.hpp>
 #include <ql/termstructures/yield/flatforward.hpp>
 #include <ql/time/date.hpp>
 #include <ql/time/daycounters/actual360.hpp>
@@ -2157,6 +2158,282 @@ BOOST_AUTO_TEST_CASE(testPillarCollisionWithDifferentMonthLengths) {
     }
 
     BOOST_CHECK_EQUAL(failureCount, (Size)0);
+}
+
+BOOST_AUTO_TEST_CASE(testForwardZeroTermStructure) {
+    BOOST_TEST_MESSAGE(
+        "Testing forward zero inflation term structure "
+        "(piecewise-constant instantaneous forward rates)...");
+
+    // Same market data as testZeroTermStructure (UK RPI, 14 ZC swap quotes)
+    Calendar calendar = UnitedKingdom();
+    BusinessDayConvention bdc = ModifiedFollowing;
+    Date evaluationDate(13, August, 2007);
+    evaluationDate = calendar.adjust(evaluationDate);
+    Settings::instance().evaluationDate() = evaluationDate;
+
+    Date from(1, January, 2005);
+    Date to(1, July, 2007);
+    Schedule rpiSchedule =
+        MakeSchedule().from(from).to(to)
+        .withFrequency(Monthly);
+
+    Real fixData[] = {
+        189.9, 189.9, 189.6, 190.5, 191.6, 192.0,
+        192.2, 192.2, 192.6, 193.1, 193.3, 193.6,
+        194.1, 193.4, 194.2, 195.0, 196.5, 197.7,
+        198.5, 198.5, 199.2, 200.1, 200.4, 201.1,
+        202.7, 201.6, 203.1, 204.4, 205.4, 206.2,
+        207.3};
+
+    RelinkableHandle<ZeroInflationTermStructure> hz;
+    auto ii = ext::make_shared<UKRPI>(hz);
+    for (Size i = 0; i < std::size(fixData); i++) {
+        ii->addFixing(rpiSchedule[i], fixData[i]);
+    }
+
+    Handle<YieldTermStructure> nominalTS(nominalTermStructure());
+
+    std::vector<Datum> zcData = {
+        { Date(13, August, 2008), 2.93 },
+        { Date(13, August, 2009), 2.95 },
+        { Date(13, August, 2010), 2.965 },
+        { Date(15, August, 2011), 2.98 },
+        { Date(13, August, 2012), 3.0 },
+        { Date(13, August, 2014), 3.06 },
+        { Date(13, August, 2017), 3.175 },
+        { Date(13, August, 2019), 3.243 },
+        { Date(15, August, 2022), 3.293 },
+        { Date(14, August, 2027), 3.338 },
+        { Date(13, August, 2032), 3.348 },
+        { Date(15, August, 2037), 3.348 },
+        { Date(13, August, 2047), 3.308 },
+        { Date(13, August, 2057), 3.228 }
+    };
+
+    Period observationLag = Period(3, Months);
+    DayCounter dc = Thirty360(Thirty360::BondBasis);
+    Frequency frequency = Monthly;
+
+    auto makeHelper = [&](const Handle<Quote>& quote, const Date& maturity) {
+        return ext::make_shared<ZeroCouponInflationSwapHelper>(
+            quote, observationLag, maturity, calendar, bdc, dc, ii, CPI::AsIndex);
+    };
+    auto helpers = makeHelpers<ZeroInflationTermStructure>(zcData, makeHelper);
+
+    Date baseDate = ii->lastFixingDate();
+
+    // Bootstrap using backward-flat instantaneous forward inflation rates
+    auto pFwdZITS =
+        ext::make_shared<PiecewiseZeroForwardInflationCurve<BackwardFlat>>(
+            evaluationDate, baseDate, frequency, dc, helpers);
+    hz.linkTo(pFwdZITS);
+
+    //=======================================================================
+    // All input ZC swaps must reprice to zero NPV
+
+    const Real eps = 1.0e-7;
+    const Spread basisPoint = 1.0e-4;
+    auto engine = ext::make_shared<DiscountingSwapEngine>(nominalTS);
+
+    for (const auto& datum : zcData) {
+        ZeroCouponInflationSwap nzcis(Swap::Payer,
+                                      1000000.0,
+                                      evaluationDate,
+                                      datum.date,
+                                      calendar, bdc, dc,
+                                      datum.rate / 100.0,
+                                      ii, observationLag,
+                                      CPI::AsIndex);
+        nzcis.setPricingEngine(engine);
+
+        BOOST_CHECK_MESSAGE(std::fabs(nzcis.NPV()) < eps,
+                            "forward-zero inflation swap does not reprice to zero"
+                            << "\n    NPV:      " << nzcis.NPV()
+                            << "\n    maturity: " << nzcis.maturityDate()
+                            << "\n    rate:     " << nzcis.fixedRate());
+
+        ZeroCouponInflationSwap nzcisBumped(Swap::Payer,
+                                             1000000.0,
+                                             evaluationDate,
+                                             datum.date,
+                                             calendar, bdc, dc,
+                                             datum.rate / 100.0 + basisPoint,
+                                             ii, observationLag,
+                                             CPI::AsIndex);
+        nzcisBumped.setPricingEngine(engine);
+
+        const Real expected = nzcisBumped.legNPV(0) - nzcis.legNPV(0);
+        BOOST_CHECK_MESSAGE(std::fabs(nzcis.fixedLegBPS() - expected) < eps,
+                            "forward-zero inflation swap does not have correct fixedLegBPS"
+                            << "\n    actual:   " << nzcis.fixedLegBPS()
+                            << "\n    expected: " << expected
+                            << "\n    maturity: " << nzcis.maturityDate()
+                            << "\n    rate:     " << nzcis.fixedRate());
+    }
+
+    //=======================================================================
+    // Bootstrapped pillar forward rates must be piecewise-constant (BackwardFlat):
+    // the instantaneous forward rate at any time strictly between two adjacent
+    // pillars equals the forward rate stored at the right pillar.
+
+    const auto& pillars = pFwdZITS->times();
+    const auto& fwds    = pFwdZITS->forwardRates();
+
+    for (Size i = 1; i + 1 < pillars.size(); ++i) {
+        // midpoint between pillar i and i+1
+        Time tmid = 0.5 * (pillars[i] + pillars[i + 1]);
+        // Numerically differentiate the cumulative integral z(t)*t to get f(t)
+        Time dtiny = 1.0e-5;
+        Rate fwdNumerical = (pFwdZITS->zeroRate(tmid + dtiny, true) * (tmid + dtiny)
+                             - pFwdZITS->zeroRate(tmid - dtiny, true) * (tmid - dtiny))
+                            / (2.0 * dtiny);
+        BOOST_CHECK_MESSAGE(std::fabs(fwdNumerical - fwds[i + 1]) < 1.0e-6,
+                            "instantaneous forward is not piecewise-constant"
+                            << "\n    interval:  [" << pillars[i] << ", " << pillars[i+1] << "]"
+                            << "\n    pillar fwd:    " << fwds[i+1]
+                            << "\n    numerical fwd: " << fwdNumerical);
+    }
+
+    // remove circular reference
+    hz.reset();
+}
+
+BOOST_AUTO_TEST_CASE(testForwardZeroVsZeroTermStructure) {
+    BOOST_TEST_MESSAGE(
+        "Testing forward-zero inflation curve consistency with zero inflation curve...");
+
+    // Build both PiecewiseZeroInflationCurve<Linear> and
+    // PiecewiseZeroForwardInflationCurve<BackwardFlat> from identical helpers
+    // and verify that both price all input ZC swaps to zero NPV and agree
+    // on zero rates at the shared pillar dates.
+
+    Calendar calendar = UnitedKingdom();
+    BusinessDayConvention bdc = ModifiedFollowing;
+    Date evaluationDate(13, August, 2007);
+    evaluationDate = calendar.adjust(evaluationDate);
+    Settings::instance().evaluationDate() = evaluationDate;
+
+    Date from(1, January, 2005);
+    Date to(1, July, 2007);
+    Schedule rpiSchedule =
+        MakeSchedule().from(from).to(to)
+        .withFrequency(Monthly);
+
+    Real fixData[] = {
+        189.9, 189.9, 189.6, 190.5, 191.6, 192.0,
+        192.2, 192.2, 192.6, 193.1, 193.3, 193.6,
+        194.1, 193.4, 194.2, 195.0, 196.5, 197.7,
+        198.5, 198.5, 199.2, 200.1, 200.4, 201.1,
+        202.7, 201.6, 203.1, 204.4, 205.4, 206.2,
+        207.3};
+
+    RelinkableHandle<ZeroInflationTermStructure> hzLinear, hzFwd;
+
+    auto iiLinear = ext::make_shared<UKRPI>(hzLinear);
+    auto iiFwd    = ext::make_shared<UKRPI>(hzFwd);
+    for (Size i = 0; i < std::size(fixData); i++) {
+        iiLinear->addFixing(rpiSchedule[i], fixData[i]);
+        iiFwd->addFixing(rpiSchedule[i], fixData[i]);
+    }
+
+    Handle<YieldTermStructure> nominalTS(nominalTermStructure());
+
+    std::vector<Datum> zcData = {
+        { Date(13, August, 2008), 2.93 },
+        { Date(13, August, 2009), 2.95 },
+        { Date(13, August, 2010), 2.965 },
+        { Date(15, August, 2011), 2.98 },
+        { Date(13, August, 2012), 3.0 },
+        { Date(13, August, 2014), 3.06 },
+        { Date(13, August, 2017), 3.175 },
+        { Date(13, August, 2019), 3.243 },
+        { Date(15, August, 2022), 3.293 },
+        { Date(14, August, 2027), 3.338 },
+        { Date(13, August, 2032), 3.348 },
+        { Date(15, August, 2037), 3.348 },
+        { Date(13, August, 2047), 3.308 },
+        { Date(13, August, 2057), 3.228 }
+    };
+
+    Period observationLag = Period(3, Months);
+    DayCounter dc = Thirty360(Thirty360::BondBasis);
+    Frequency frequency = Monthly;
+    Date baseDate = iiLinear->lastFixingDate();
+
+    // Build helpers for the linear zero curve
+    auto helpersLinear = makeHelpers<ZeroInflationTermStructure>(
+        zcData, [&](const Handle<Quote>& q, const Date& d) {
+            return ext::make_shared<ZeroCouponInflationSwapHelper>(
+                q, observationLag, d, calendar, bdc, dc, iiLinear, CPI::AsIndex);
+        });
+    // Build helpers for the forward zero curve
+    auto helpersFwd = makeHelpers<ZeroInflationTermStructure>(
+        zcData, [&](const Handle<Quote>& q, const Date& d) {
+            return ext::make_shared<ZeroCouponInflationSwapHelper>(
+                q, observationLag, d, calendar, bdc, dc, iiFwd, CPI::AsIndex);
+        });
+
+    auto pZITS =
+        ext::make_shared<PiecewiseZeroInflationCurve<Linear>>(
+            evaluationDate, baseDate, frequency, dc, helpersLinear);
+    hzLinear.linkTo(pZITS);
+
+    auto pFwdZITS =
+        ext::make_shared<PiecewiseZeroForwardInflationCurve<BackwardFlat>>(
+            evaluationDate, baseDate, frequency, dc, helpersFwd);
+    hzFwd.linkTo(pFwdZITS);
+
+    const Real eps = 1.0e-7;
+    auto engine = ext::make_shared<DiscountingSwapEngine>(nominalTS);
+
+    // Both curves must reprice all input ZC swaps to zero NPV
+    for (const auto& datum : zcData) {
+        {
+            ZeroCouponInflationSwap nzcis(Swap::Payer, 1000000.0,
+                                          evaluationDate, datum.date,
+                                          calendar, bdc, dc,
+                                          datum.rate / 100.0,
+                                          iiLinear, observationLag, CPI::AsIndex);
+            nzcis.setPricingEngine(engine);
+            BOOST_CHECK_MESSAGE(std::fabs(nzcis.NPV()) < eps,
+                                "linear zero curve: ZC swap does not reprice to zero"
+                                << "\n    NPV:      " << nzcis.NPV()
+                                << "\n    maturity: " << nzcis.maturityDate());
+        }
+        {
+            ZeroCouponInflationSwap nzcis(Swap::Payer, 1000000.0,
+                                          evaluationDate, datum.date,
+                                          calendar, bdc, dc,
+                                          datum.rate / 100.0,
+                                          iiFwd, observationLag, CPI::AsIndex);
+            nzcis.setPricingEngine(engine);
+            BOOST_CHECK_MESSAGE(std::fabs(nzcis.NPV()) < eps,
+                                "forward zero curve: ZC swap does not reprice to zero"
+                                << "\n    NPV:      " << nzcis.NPV()
+                                << "\n    maturity: " << nzcis.maturityDate());
+        }
+    }
+
+    // Both curves must agree on zero rates at the shared instrument pillar dates.
+    // We skip dates()[0] (the base date, which precedes the reference date) because
+    // the two curves store different quantities in data_[0]: the zero curve stores
+    // the base zero rate while the forward curve stores the base forward rate.
+    // Agreement is only meaningful at the instrument pillars (dates()[1] onward).
+    const auto& pillarDates = pZITS->dates();
+    for (Size i = 1; i < pillarDates.size(); ++i) {
+        const Date& d = pillarDates[i];
+        Rate rLinear = pZITS->zeroRate(d);
+        Rate rFwd    = pFwdZITS->zeroRate(d);
+        BOOST_CHECK_MESSAGE(std::fabs(rLinear - rFwd) < 1.0e-6,
+                            "zero rates disagree at pillar " << d
+                            << "\n    linear zero:  " << rLinear
+                            << "\n    forward zero: " << rFwd);
+    }
+
+    // remove circular references
+    hzLinear.reset();
+    hzFwd.reset();
 }
 
 BOOST_AUTO_TEST_SUITE_END()

@@ -20,6 +20,7 @@
 
 #include <ql/indexes/inflationindex.hpp>
 #include <ql/termstructures/inflationtermstructure.hpp>
+#include <cmath>
 #include <ql/time/calendars/nullcalendar.hpp>
 #include <utility>
 
@@ -230,6 +231,17 @@ namespace QuantLib {
         std::pair<Date, Date> fixingPeriod = inflationPeriod(fixingDate, frequency_);
 
         Date firstDateInPeriod = fixingPeriod.first;
+
+        // If the curve stores NACC instantaneous forwards (ForwardInflationTermStructure),
+        // use exp(integral from baseDate to firstDateInPeriod) for CPI projection.
+        auto* fts = dynamic_cast<ForwardInflationTermStructure*>(zeroInflation_.currentLink().get());
+        if (fts != nullptr) {
+            Real ratio = fts->cpiRatio(firstDateInPeriod, false);
+            if (ratio <= 0.0)
+                return 0.0;
+            return baseFixing * ratio;
+        }
+
         Rate Z1 = zeroInflation_->zeroRate(firstDateInPeriod, false);
         Time t1 = inflationYearFraction(frequency_, false, zeroInflation_->dayCounter(),
                                         baseDate, firstDateInPeriod);

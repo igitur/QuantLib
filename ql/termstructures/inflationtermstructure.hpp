@@ -177,6 +177,75 @@ namespace QuantLib {
     };
 
 
+    //! Interface for forward (instantaneous) inflation term structures.
+    /*!  Stores NACC (continuously-compounded) instantaneous forward
+         inflation rates f(t).  The zero-coupon rate is recovered by
+         integration:
+         \f[
+             z(T) = \frac{1}{T} \int_0^T f(t)\, dt
+         \f]
+         and the CPI growth factor (ratio of projected to base CPI) is
+         \f[
+             \text{cpiRatio}(T) = \exp\!\left(\int_0^T f(t)\, dt\right)
+                                = \exp(z(T) \cdot T)
+         \f]
+
+         This class inherits from ZeroInflationTermStructure so that it
+         can be held in a Handle<ZeroInflationTermStructure> and used
+         wherever a zero-inflation curve is expected.  The zeroRateImpl()
+         method is implemented here via integration, while subclasses
+         override forwardRateImpl() instead.
+
+         \ingroup inflationtermstructures
+    */
+    class ForwardInflationTermStructure : public ZeroInflationTermStructure {
+      public:
+        //! \name Constructors (mirror ZeroInflationTermStructure)
+        //@{
+        ForwardInflationTermStructure(Date baseDate,
+                                      Frequency frequency,
+                                      const DayCounter& dayCounter,
+                                      const ext::shared_ptr<Seasonality>& seasonality = {});
+
+        ForwardInflationTermStructure(const Date& referenceDate,
+                                      Date baseDate,
+                                      Frequency frequency,
+                                      const DayCounter& dayCounter,
+                                      const ext::shared_ptr<Seasonality>& seasonality = {});
+
+        ForwardInflationTermStructure(Natural settlementDays,
+                                      const Calendar& calendar,
+                                      Date baseDate,
+                                      Frequency frequency,
+                                      const DayCounter& dayCounter,
+                                      const ext::shared_ptr<Seasonality>& seasonality = {});
+        //@}
+
+        //! \name Inspectors
+        //@{
+        //! NACC instantaneous forward inflation rate at date d.
+        Rate forwardRate(const Date& d, bool extrapolate = false) const;
+        //! NACC instantaneous forward inflation rate at time t from base date.
+        Rate forwardRate(Time t, bool extrapolate = false) const;
+
+        //! CPI growth factor exp(integral of f from 0 to t(d)).
+        /*! This is the ratio CPI(d) / CPI(baseDate) implied by the
+            forward curve, using the NACC convention.  Use this instead
+            of pow(1+z, t) when the curve stores NACC forwards.
+        */
+        Real cpiRatio(const Date& d, bool extrapolate = false) const;
+        virtual Real cpiRatio(Time t, bool extrapolate = false) const;
+        //@}
+
+      protected:
+        //! To be implemented by subclasses: NACC forward rate at time t.
+        virtual Rate forwardRateImpl(Time t) const = 0;
+
+        //! Implements ZeroInflationTermStructure: z(T) = (1/T) int_0^T f dt.
+        Rate zeroRateImpl(Time t) const override;
+    };
+
+
     //! Base class for year-on-year inflation term structures.
     class YoYInflationTermStructure : public InflationTermStructure {
       public:

@@ -19,6 +19,7 @@
 
 #include <ql/indexes/inflationindex.hpp>
 #include <ql/termstructures/inflationtermstructure.hpp>
+#include <cmath>
 #include <utility>
 
 namespace QuantLib {
@@ -256,6 +257,79 @@ namespace QuantLib {
     }
 
 
+    // ForwardInflationTermStructure
+
+    ForwardInflationTermStructure::ForwardInflationTermStructure(
+                                       Date baseDate,
+                                       Frequency frequency,
+                                       const DayCounter& dayCounter,
+                                       const ext::shared_ptr<Seasonality>& seasonality)
+    : ZeroInflationTermStructure(baseDate, frequency, dayCounter, seasonality) {}
+
+    ForwardInflationTermStructure::ForwardInflationTermStructure(
+                                       const Date& referenceDate,
+                                       Date baseDate,
+                                       Frequency frequency,
+                                       const DayCounter& dayCounter,
+                                       const ext::shared_ptr<Seasonality>& seasonality)
+    : ZeroInflationTermStructure(referenceDate, baseDate, frequency, dayCounter, seasonality) {}
+
+    ForwardInflationTermStructure::ForwardInflationTermStructure(
+                                       Natural settlementDays,
+                                       const Calendar& calendar,
+                                       Date baseDate,
+                                       Frequency frequency,
+                                       const DayCounter& dayCounter,
+                                       const ext::shared_ptr<Seasonality>& seasonality)
+    : ZeroInflationTermStructure(settlementDays, calendar, baseDate, frequency, dayCounter, seasonality) {}
+
+    Rate ForwardInflationTermStructure::forwardRate(const Date& d, bool extrapolate) const {
+        checkRange(d, extrapolate);
+        Time t = timeFromReference(d);
+        return forwardRateImpl(t);
+    }
+
+    Rate ForwardInflationTermStructure::forwardRate(Time t, bool extrapolate) const {
+        checkRange(t, extrapolate);
+        return forwardRateImpl(t);
+    }
+
+    Real ForwardInflationTermStructure::cpiRatio(const Date& d, bool extrapolate) const {
+        checkRange(d, extrapolate);
+        Time t = timeFromReference(d);
+        return cpiRatio(t, extrapolate);
+    }
+
+    Real ForwardInflationTermStructure::cpiRatio(Time t, bool extrapolate) const {
+        if (t <= 0.0)
+            return 1.0;
+        // exp(z(t) * t) = exp(integral of f from 0 to t)
+        return std::exp(zeroRateImpl(t) * t);
+    }
+
+    Rate ForwardInflationTermStructure::zeroRateImpl(Time t) const {
+        // Subclasses implement forwardRateImpl; we recover the zero rate
+        // by noting that zeroRateImpl is called by the base-class zeroRate()
+        // methods and also by cpiRatio().  We integrate numerically using
+        // Simpson's rule over N steps.  For a BackwardFlat interpolator the
+        // interpolation primitive is exact; here we keep it generic.
+        if (t <= 0.0)
+            return forwardRateImpl(0.0);
+
+        // Use the interpolation primitive directly if available via the
+        // derived class — but since this is the generic base, we do a simple
+        // numerical integration (N = 100 steps, sufficient for smooth curves).
+        const int N = 100;
+        Real sum = 0.0;
+        Real dt = t / N;
+        for (int i = 0; i < N; ++i) {
+            Real ta = i * dt;
+            Real tb = (i + 1) * dt;
+            // Simpson 1/3
+            sum += (forwardRateImpl(ta) + 4.0 * forwardRateImpl(0.5*(ta+tb)) + forwardRateImpl(tb)) * dt / 6.0;
+        }
+        return sum / t;
+    }
 
 
     std::pair<Date,Date> inflationPeriod(const Date& d,
